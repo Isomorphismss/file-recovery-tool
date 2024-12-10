@@ -334,136 +334,63 @@ int main(int argc, char *argv[])
         }
     }
     if (nonContRmvFlg){
+        // Logic for non-contiguous file recovery
         int dltFileNameLen = strlen(deletedFile);
         DirEntry* dirEntryArr[100];
-        DirEntry* confirmDirEntry;
-        int namePassed = 0, extpassed = 0, fileFound = 0, clusterNum = 0;
-        while (currentAddress < 0x0ffffff8 && currentAddress != 0x00){ // Traverse all possible clusters
-            clusterCount = 0;
-            dirEntryOffset = ((currentAddress - 2)*fatEntry->BPB_SecPerClus + fatEntry->BPB_RsvdSecCnt + (fatEntry->BPB_NumFATs*fatEntry->BPB_FATSz32))*fatEntry->BPB_BytsPerSec;
+        int fileFound = 0;
+
+        // Traverse through all clusters to find matching files
+        while (currentAddress < 0x0ffffff8 && currentAddress != 0x00) {
+            dirEntryOffset = ((currentAddress - 2) * fatEntry->BPB_SecPerClus + fatEntry->BPB_RsvdSecCnt + 
+                            (fatEntry->BPB_NumFATs * fatEntry->BPB_FATSz32)) * fatEntry->BPB_BytsPerSec;
             baseAddress = (char*)mapped_address + dirEntryOffset;
             dirEntry = (DirEntry*)(baseAddress);
-            while (dirEntry->DIR_Name[0] != 0x00){ // Traverse the entries in the cluster until we reach EOF or end of cluster
-                namePassed = 0;
-                extpassed = 0;
-                clusterCount++;
-                if (clusterCount > (fatEntry->BPB_SecPerClus*fatEntry->BPB_BytsPerSec)/sizeof(DirEntry)){ // Finished Traversing this cluster
-                    break;
+
+            while (dirEntry->DIR_Name[0] != 0x00) {
+                if (dirEntry->DIR_Name[0] == 0xe5) { // Deleted file
+                    int nameMatch = 1;
+                    for (int i = 1; i < dltFileNameLen; i++) {
+                        if (deletedFile[i] != dirEntry->DIR_Name[i]) {
+                            nameMatch = 0;
+                            break;
+                        }
+                    }
+                    if (nameMatch) {
+                        dirEntryArr[fileFound++] = dirEntry;
+                    }
                 }
-                if (dirEntry->DIR_Name[0] == 0xe5){ // Deleted file
-                    for (i = 1; i < dltFileNameLen; i++){
-                        if (deletedFile[i] == '.'){ // File has extension
-                            if (i == 8 || dirEntry->DIR_Name[i] == ' ') // Name part matches
-                                namePassed++;
-                            break;
-                        }
-                        else if (deletedFile[i] != dirEntry->DIR_Name[i]){
-                            break;
-                        }
-                        else if (i == dltFileNameLen - 1){ // Name part matches (no extension part)
-                            namePassed++;
-                            break;
-                        }
-                    }
-                    if (namePassed){ // If name part matches, then we compare extension
-                        j = 8;
-                        i++;
-                        for (; i < dltFileNameLen; i++){
-                            if (deletedFile[i] != dirEntry->DIR_Name[j]){
-                                break;
-                            }
-                            j++;
-                        }
-                        if ((i == dltFileNameLen) && (j == 11 || dirEntry->DIR_Name[j] == ' ')){ // Extension part matches
-                            extpassed++;
-                        }
-                    }
-                    if (dltFileNameLen == 1 && dirEntry->DIR_Name[1] == ' ' && dirEntry->DIR_Name[8] == ' '){ // File with only 1 char as name, then we auto pass it
-                        namePassed++;
-                        extpassed++;
-                    }
-                    if (namePassed && extpassed){ // If there is a file match
-                        dirEntryArr[fileFound] = dirEntry;
-                        fileFound++; // Flag that indicates how many match we have
-                    }
-                }    
-                baseAddress = (char*)baseAddress + sizeof(DirEntry); // Next entry within this same cluster
-                dirEntry = (DirEntry*)(baseAddress);
+                dirEntry = (DirEntry*)((char*)dirEntry + sizeof(DirEntry));
             }
-            currentAddress = fatAddressArr[0][currentAddress]; // Use the first FAT to find the next cluster address
+            currentAddress = fatAddressArr[0][currentAddress];
         }
-        if (fileFound){
-            if (fileFound > 1 || shaFlag){ // If multiple matches
-                if (shaFlag){ // If SHA is provided
-                    unsigned char md[SHA_DIGEST_LENGTH]; // SHA1 result of the file
-                    unsigned char* d; // Starting location
-                    int finalFileFound = 0;
-                    for (i = 0; i < fileFound; i++){
-                        highPart = dirEntryArr[i]->DIR_FstClusHI;
-                        lowPart = dirEntryArr[i]->DIR_FstClusLO;
-                        startingCluster = (highPart << 16) | lowPart;
-                        d = (char*)mapped_address + ((startingCluster - 2)*fatEntry->BPB_SecPerClus + fatEntry->BPB_RsvdSecCnt + (fatEntry->BPB_NumFATs*fatEntry->BPB_FATSz32))*fatEntry->BPB_BytsPerSec;
-                        SHA1(d, dirEntryArr[i]->DIR_FileSize, md);
-                        if (memcmp(md, providedSHA, SHA_DIGEST_LENGTH) == 0){
-                            finalFileFound++;
-                            confirmDirEntry = dirEntryArr[i];
-                            break;
-                        }
-                    }
-                    if (finalFileFound){
-                        confirmDirEntry->DIR_Name[0] = deletedFile[0];
-                        clusterNum = ceil((double) confirmDirEntry->DIR_FileSize/(fatEntry->BPB_BytsPerSec*fatEntry->BPB_SecPerClus)); // How many clusters the file occupies
-                        for (k = 0; k < clusterNum; k++){ // Traverse and restore the FAT chain
-                            if (k == clusterNum - 1){ // If we reach end of chain in FAT
-                                for (j = 0; j < fatEntry->BPB_NumFATs; j++){ // Update every FAT
-                                    fatAddressArr[j][startingCluster] = EOF;
-                                }
-                            } 
-                            else{
-                                for (j = 0; j < fatEntry->BPB_NumFATs; j++){ // Update every FAT
-                                    fatAddressArr[j][startingCluster] = startingCluster + 1;
-                                }
-                            }
-                            startingCluster++;
-                        }
-                        printf("%s: successfully recovered with SHA-1\n", deletedFile);
-                        exit(0);
-                    }
-                    else{
-                        printf("%s: file not found\n", deletedFile);
-                        exit(1);
-                    }
-                }
-                else{ // filename is ambiguous!!
-                    printf("%s: multiple candidates found\n", deletedFile);
-                    exit(1); 
-                }
+
+        // Check for SHA-1 verification
+        for (int i = 0; i < fileFound; i++) {
+            DirEntry* targetFile = dirEntryArr[i];
+            unsigned int startCluster = ((targetFile->DIR_FstClusHI << 16) | targetFile->DIR_FstClusLO);
+            unsigned int cluster = startCluster;
+            unsigned char fileData[targetFile->DIR_FileSize];
+            int offset = 0;
+
+            while (cluster < 0x0ffffff8) {
+                unsigned int clusterOffset = ((cluster - 2) * fatEntry->BPB_SecPerClus + fatEntry->BPB_RsvdSecCnt + 
+                                            (fatEntry->BPB_NumFATs * fatEntry->BPB_FATSz32)) * fatEntry->BPB_BytsPerSec;
+                memcpy(fileData + offset, (char*)mapped_address + clusterOffset, fatEntry->BPB_SecPerClus * fatEntry->BPB_BytsPerSec);
+                offset += fatEntry->BPB_SecPerClus * fatEntry->BPB_BytsPerSec;
+                cluster = fatAddressArr[0][cluster];
             }
-            else{ // If only one match
-                highPart = dirEntryArr[0]->DIR_FstClusHI;
-                lowPart = dirEntryArr[0]->DIR_FstClusLO;
-                startingCluster = (highPart << 16) | lowPart;
-                dirEntryArr[0]->DIR_Name[0] = deletedFile[0]; // Restore the first char from 0xe5
-                clusterNum = ceil((double) dirEntryArr[0]->DIR_FileSize/(fatEntry->BPB_BytsPerSec*fatEntry->BPB_SecPerClus)); // How many clusters the file occupies
-                for (k = 0; k < clusterNum; k++){ // Traverse and restore the FAT chain
-                    if (k == clusterNum - 1){ // If we reach end of chain in FAT
-                        for (j = 0; j < fatEntry->BPB_NumFATs; j++){ // Update every FAT
-                            fatAddressArr[j][startingCluster] = EOF;
-                        }
-                    } 
-                    else{
-                        for (j = 0; j < fatEntry->BPB_NumFATs; j++){ // Update every FAT
-                            fatAddressArr[j][startingCluster] = startingCluster + 1;
-                        }
-                    }
-                    startingCluster++;
-                }
+
+            unsigned char md[SHA_DIGEST_LENGTH];
+            SHA1(fileData, targetFile->DIR_FileSize, md);
+
+            if (memcmp(md, providedSHA, SHA_DIGEST_LENGTH) == 0) {
+                targetFile->DIR_Name[0] = deletedFile[0]; // Restore first character
                 printf("%s: successfully recovered\n", deletedFile);
                 return 0;
             }
         }
-        else{
-            printf("%s: file not found\n", deletedFile);
-        }
+
+        printf("%s: file not found\n", deletedFile);
+        exit(1);
     }
 }
