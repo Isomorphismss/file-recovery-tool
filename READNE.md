@@ -1,4 +1,5 @@
 # FAT32 File Recovery Tool
+![MIT License](https://img.shields.io/badge/License-MIT-cyan.svg)
 
 This project is a robust utility for recovering deleted files from a FAT32 file system. It includes functionality to inspect file system details, list directory contents, and recover files (both contiguous and non-contiguous) with optional SHA-1 hash verification to ensure data integrity. The project leverages memory mapping (`mmap`) and handles FAT32-specific structures for efficient and reliable operations.
 
